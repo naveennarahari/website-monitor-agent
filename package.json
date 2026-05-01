@@ -1,0 +1,17 @@
+{
+  "name": "website-monitor-agent",
+  "version": "1.0.0",
+  "description": "Weekly website health monitor powered by Claude AI, running on GitHub Actions",
+  "type": "module",
+  "main": "src/monitor.js",
+  "scripts": {
+    "start": "node src/monitor.js",
+    "test:dry": "node src/monitor.js --dry-run"
+  },
+  "dependencies": {
+    "nodemailer": "^6.9.14"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
