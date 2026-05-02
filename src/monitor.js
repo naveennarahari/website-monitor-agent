@@ -1,8 +1,8 @@
 
 /**
  * Website Monitor Agent
- * Checks website health metrics, generates an AI report via Claude API,
- * and emails it weekly via Gmail SMTP.
+ * Checks website health metrics, generates an AI report via Claude API
+ * (with Gemini as fallback), and emails it weekly via Gmail SMTP.
  */
 
 import https from 'https';
@@ -24,6 +24,7 @@ const WEBSITES = [
 ];
 
 const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const GEMINI_API_KEY    = process.env.GEMINI_API_KEY;
 const GMAIL_USER        = process.env.GMAIL_USER;
 const GMAIL_APP_PASSWORD= process.env.GMAIL_APP_PASSWORD;
 const REPORT_RECIPIENT  = process.env.REPORT_RECIPIENT || GMAIL_USER;
@@ -114,11 +115,9 @@ async function auditSite(site) {
   return result;
 }
 
-// ─── Generate report using Claude API ────────────────────────────────────────
-async function generateReport(auditResults) {
-  console.log('\nGenerating report via Claude API...');
-
-  const prompt = `You are a professional website monitoring agent reporting to Naveen Narahari, 
+// ─── Shared prompt builder ────────────────────────────────────────────────────
+function buildPrompt(auditResults, poweredBy) {
+  return `You are a professional website monitoring agent reporting to Naveen Narahari, 
 an Engineering Manager and portfolio owner. Analyse the following website audit data collected 
 this week and produce a concise, actionable HTML email report.
 
@@ -132,9 +131,14 @@ Your report must:
 4. Include a "Recommendations" section with 2–3 specific, actionable improvements
 5. Use a colour scheme: #1a1a2e header, #16213e body, white cards with subtle borders
 6. Keep it concise — this is a weekly digest, not a deep audit
-7. Sign off as "Website Monitor Agent — Powered by Claude"
+7. Sign off as "Website Monitor Agent — Powered by ${poweredBy}"
 
 Return ONLY the HTML content starting with <div — no markdown, no code fences, no explanations.`;
+}
+
+// ─── Generate report using Claude API ────────────────────────────────────────
+async function generateReportClaude(auditResults) {
+  console.log('\n[AI] Attempting Claude API...');
 
   const response = await fetch('https://api.anthropic.com/v1/messages', {
     method: 'POST',
@@ -146,7 +150,7 @@ Return ONLY the HTML content starting with <div — no markdown, no code fences,
     body: JSON.stringify({
       model: 'claude-sonnet-4-20250514',
       max_tokens: 4000,
-      messages: [{ role: 'user', content: prompt }],
+      messages: [{ role: 'user', content: buildPrompt(auditResults, 'Claude') }],
     }),
   });
 
@@ -156,7 +160,66 @@ Return ONLY the HTML content starting with <div — no markdown, no code fences,
   }
 
   const data = await response.json();
+  console.log('  ✓ Claude responded successfully');
   return data.content[0].text;
+}
+
+// ─── Generate report using Gemini API (fallback) ──────────────────────────────
+async function generateReportGemini(auditResults) {
+  console.log('[AI] Falling back to Gemini API...');
+
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=${GEMINI_API_KEY}`;
+
+  const response = await fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      contents: [
+        {
+          parts: [{ text: buildPrompt(auditResults, 'Gemini') }],
+        },
+      ],
+      generationConfig: {
+        maxOutputTokens: 4000,
+        temperature: 0.4,
+      },
+    }),
+  });
+
+  if (!response.ok) {
+    const err = await response.text();
+    throw new Error(`Gemini API error ${response.status}: ${err}`);
+  }
+
+  const data = await response.json();
+  const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+
+  if (!text) throw new Error('Gemini returned empty response');
+
+  console.log('  ✓ Gemini responded successfully');
+  return text;
+}
+
+// ─── Orchestrator: Claude first, Gemini fallback ──────────────────────────────
+async function generateReport(auditResults) {
+  // Try Claude if key is present
+  if (ANTHROPIC_API_KEY) {
+    try {
+      return await generateReportClaude(auditResults);
+    } catch (err) {
+      console.warn(`  ⚠ Claude failed: ${err.message}`);
+      console.warn('  → Switching to Gemini fallback...');
+    }
+  } else {
+    console.log('[AI] ANTHROPIC_API_KEY not set — skipping Claude, using Gemini directly.');
+  }
+
+  // Fallback to Gemini
+  if (!GEMINI_API_KEY) {
+    throw new Error('Neither ANTHROPIC_API_KEY nor GEMINI_API_KEY is configured. Cannot generate report.');
+  }
+
+  return generateReportGemini(auditResults);
 }
 
 // ─── Send email via Gmail SMTP ─────────────────────────────────────────────
@@ -195,7 +258,7 @@ async function main() {
     // 1. Audit all sites concurrently
     const auditResults = await Promise.all(WEBSITES.map(auditSite));
 
-    // 2. Generate Claude report
+    // 2. Generate AI report (Claude → Gemini fallback)
     const htmlReport = await generateReport(auditResults);
 
     // 3. Send email

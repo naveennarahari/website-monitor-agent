@@ -1,6 +1,7 @@
 # Website Monitor Agent
 
-A Claude-powered agent that audits your portfolio websites every Monday and emails you a health report.
+A Claude-powered agent that audits your portfolio websites every Monday and emails you a health report.  
+**Gemini 1.5 Pro is used as automatic fallback** when Claude is unavailable (e.g. free plan limits).
 
 ## What it checks
 
@@ -11,6 +12,18 @@ A Claude-powered agent that audits your portfolio websites every Monday and emai
 | **SSL certificate** | Days until expiry, warns if < 30 days |
 | **SEO meta tags** | title, description, og:title, canonical, viewport, H1 count |
 | **Page size** | Total HTML payload in KB |
+
+## AI Fallback Logic
+
+```
+Claude API available & key set?
+  ├─ YES → Try Claude first
+  │         ├─ Success → Use Claude report ✅
+  │         └─ Fails (quota/plan limit) → Fall back to Gemini ♻️
+  └─ NO  → Use Gemini directly ✅
+```
+
+The email sign-off will indicate which model generated the report.
 
 ## Setup (one-time, ~10 minutes)
 
@@ -24,12 +37,15 @@ A Claude-powered agent that audits your portfolio websites every Monday and emai
 ### 3. Add GitHub Secrets
 Go to your repo → **Settings → Secrets and variables → Actions → New repository secret**
 
-| Secret name | Value |
-|---|---|
-| `ANTHROPIC_API_KEY` | Your Claude API key from console.anthropic.com |
-| `GMAIL_USER` | Your Gmail address (e.g. naveen@gmail.com) |
-| `GMAIL_APP_PASSWORD` | The 16-char app password from step 2 |
-| `REPORT_RECIPIENT` | Email to receive reports (can be same as GMAIL_USER) |
+| Secret name | Value | Required |
+|---|---|---|
+| `GEMINI_API_KEY` | Your Gemini API key from [aistudio.google.com](https://aistudio.google.com) | ✅ Required |
+| `GMAIL_USER` | Your Gmail address (e.g. naveen@gmail.com) | ✅ Required |
+| `GMAIL_APP_PASSWORD` | The 16-char app password from step 2 | ✅ Required |
+| `REPORT_RECIPIENT` | Email to receive reports (can be same as GMAIL_USER) | ✅ Required |
+| `ANTHROPIC_API_KEY` | Your Claude API key from console.anthropic.com | ⚡ Optional (primary AI) |
+
+> **Tip:** Add both keys for best results — Claude runs first, Gemini catches any failures automatically.
 
 ### 4. Trigger your first run
 Go to **Actions → Weekly Website Monitor → Run workflow** to test immediately.
@@ -51,5 +67,10 @@ const WEBSITES = [
 ## Local testing
 ```bash
 npm install
-ANTHROPIC_API_KEY=sk-... GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx REPORT_RECIPIENT=you@gmail.com node src/monitor.js
+
+# Gemini only
+GEMINI_API_KEY=your-key GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx REPORT_RECIPIENT=you@gmail.com node src/monitor.js
+
+# Claude primary + Gemini fallback
+ANTHROPIC_API_KEY=sk-... GEMINI_API_KEY=your-key GMAIL_USER=you@gmail.com GMAIL_APP_PASSWORD=xxxx REPORT_RECIPIENT=you@gmail.com node src/monitor.js
 ```
