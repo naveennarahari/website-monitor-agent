@@ -1,120 +1,130 @@
 /**
  * analytics.js
- * Fetches last 7 days of visitor stats from Google Analytics 4 Data API
- * using a service account (no OAuth flow needed — works in CI/GitHub Actions).
+ * Fetches last 7 days of visitor stats from GoatCounter REST API.
+ * GoatCounter is free for personal use — no payment required.
+ * https://www.goatcounter.com
  */
 
-import crypto from 'crypto';
-
-// ─── JWT creation for Google service account auth ─────────────────────────────
-function createJWT(serviceAccount) {
-  const header = Buffer.from(JSON.stringify({ alg: 'RS256', typ: 'JWT' })).toString('base64url');
-
-  const now = Math.floor(Date.now() / 1000);
-  const payload = Buffer.from(JSON.stringify({
-    iss: serviceAccount.client_email,
-    scope: 'https://www.googleapis.com/auth/analytics.readonly',
-    aud: 'https://oauth2.googleapis.com/token',
-    exp: now + 3600,
-    iat: now,
-  })).toString('base64url');
-
-  const sign = crypto.createSign('RSA-SHA256');
-  sign.update(`${header}.${payload}`);
-  const signature = sign.sign(serviceAccount.private_key, 'base64url');
-
-  return `${header}.${payload}.${signature}`;
+// ─── Format a date as YYYY-MM-DD ─────────────────────────────────────────────
+function formatDate(date) {
+  return date.toISOString().split('T')[0];
 }
 
-// ─── Exchange JWT for short-lived access token ────────────────────────────────
-async function getAccessToken(serviceAccount) {
-  const jwt = createJWT(serviceAccount);
+// ─── Fetch total pageview stats for last 7 days ───────────────────────────────
+async function fetchTotals(siteCode, apiToken) {
+  const end   = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 7);
 
-  const response = await fetch('https://oauth2.googleapis.com/token', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-    body: new URLSearchParams({
-      grant_type: 'urn:ietf:params:oauth:grant-type:jwt-bearer',
-      assertion: jwt,
-    }),
+  const url = `https://${siteCode}.goatcounter.com/api/v0/stats/total?start=${formatDate(start)}&end=${formatDate(end)}`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
   });
 
-  const data = await response.json();
-  if (!data.access_token) throw new Error(`Token exchange failed: ${JSON.stringify(data)}`);
-  return data.access_token;
+  if (!res.ok) throw new Error(`GoatCounter totals error ${res.status}: ${await res.text()}`);
+  return res.json(); // { total, total_unique }
 }
 
-// ─── Parse GA4 report rows into friendly objects ──────────────────────────────
-function parseReport(gaResponse) {
-  if (!gaResponse.rows || gaResponse.rows.length === 0) {
-    return { dailyRows: [], totals: null };
-  }
+// ─── Fetch daily breakdown for sparkline/table ────────────────────────────────
+async function fetchDaily(siteCode, apiToken) {
+  const end   = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 7);
 
-  const metricNames = gaResponse.metricHeaders.map(h => h.name);
-  const dimNames    = gaResponse.dimensionHeaders.map(h => h.name);
+  const url = `https://${siteCode}.goatcounter.com/api/v0/stats/hits?start=${formatDate(start)}&end=${formatDate(end)}&daily=true`;
 
-  const dailyRows = gaResponse.rows.map(row => {
-    const dims    = Object.fromEntries(row.dimensionValues.map((v, i) => [dimNames[i], v.value]));
-    const metrics = Object.fromEntries(row.metricValues.map((v, i)  => [metricNames[i], v.value]));
-    return { ...dims, ...metrics };
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
   });
 
-  // Roll up totals across all days
-  const totals = {
-    sessions:               dailyRows.reduce((s, r) => s + parseInt(r.sessions  || 0), 0),
-    activeUsers:            dailyRows.reduce((s, r) => s + parseInt(r.activeUsers || 0), 0),
-    screenPageViews:        dailyRows.reduce((s, r) => s + parseInt(r.screenPageViews || 0), 0),
-    newUsers:               dailyRows.reduce((s, r) => s + parseInt(r.newUsers || 0), 0),
-    avgBounceRate:          (dailyRows.reduce((s, r) => s + parseFloat(r.bounceRate || 0), 0) / dailyRows.length * 100).toFixed(1),
-    avgSessionDurationSecs: (dailyRows.reduce((s, r) => s + parseFloat(r.averageSessionDuration || 0), 0) / dailyRows.length).toFixed(0),
-  };
+  if (!res.ok) throw new Error(`GoatCounter hits error ${res.status}: ${await res.text()}`);
+  const data = await res.json();
 
-  return { dailyRows, totals };
+  // Flatten into [{date, pageviews, visitors}]
+  return (data.hits || []).map(h => ({
+    date:      h.day,
+    pageviews: h.count,
+    visitors:  h.count_unique,
+  }));
 }
 
-// ─── Main export: fetch GA4 stats for one property ───────────────────────────
-export async function fetchAnalytics(propertyId, serviceAccountJson) {
+// ─── Fetch top pages for last 7 days ─────────────────────────────────────────
+async function fetchTopPages(siteCode, apiToken) {
+  const end   = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 7);
+
+  const url = `https://${siteCode}.goatcounter.com/api/v0/stats/pages?start=${formatDate(start)}&end=${formatDate(end)}&limit=5`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+  });
+
+  if (!res.ok) throw new Error(`GoatCounter pages error ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+
+  return (data.pages || []).map(p => ({
+    path:      p.path,
+    pageviews: p.count,
+    visitors:  p.count_unique,
+  }));
+}
+
+// ─── Fetch top referrers ──────────────────────────────────────────────────────
+async function fetchReferrers(siteCode, apiToken) {
+  const end   = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 7);
+
+  const url = `https://${siteCode}.goatcounter.com/api/v0/stats/refs?start=${formatDate(start)}&end=${formatDate(end)}&limit=5`;
+
+  const res = await fetch(url, {
+    headers: { Authorization: `Bearer ${apiToken}`, 'Content-Type': 'application/json' },
+  });
+
+  if (!res.ok) throw new Error(`GoatCounter refs error ${res.status}: ${await res.text()}`);
+  const data = await res.json();
+
+  return (data.refs || []).map(r => ({
+    referrer:  r.ref || '(direct)',
+    pageviews: r.count,
+    visitors:  r.count_unique,
+  }));
+}
+
+// ─── Main export ──────────────────────────────────────────────────────────────
+export async function fetchAnalytics(siteCode, apiToken) {
   try {
-    const serviceAccount = JSON.parse(serviceAccountJson);
-    const token = await getAccessToken(serviceAccount);
+    const [totals, dailyRows, topPages, referrers] = await Promise.all([
+      fetchTotals(siteCode, apiToken),
+      fetchDaily(siteCode, apiToken),
+      fetchTopPages(siteCode, apiToken),
+      fetchReferrers(siteCode, apiToken),
+    ]);
 
-    const response = await fetch(
-      `https://analyticsdata.googleapis.com/v1beta/properties/${propertyId}:runReport`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${token}`,
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          dateRanges: [{ startDate: '7daysAgo', endDate: 'today' }],
-          metrics: [
-            { name: 'sessions' },
-            { name: 'activeUsers' },
-            { name: 'screenPageViews' },
-            { name: 'newUsers' },
-            { name: 'bounceRate' },
-            { name: 'averageSessionDuration' },
-          ],
-          dimensions: [{ name: 'date' }],
-          orderBys: [{ dimension: { dimensionName: 'date' } }],
-        }),
-      }
-    );
+    console.log(`  ✓ GoatCounter (${siteCode}): ${totals.total} pageviews, ${totals.total_unique} visitors last 7 days`);
 
-    if (!response.ok) {
-      const err = await response.text();
-      throw new Error(`GA4 API ${response.status}: ${err}`);
-    }
-
-    const raw = await response.json();
-    const { dailyRows, totals } = parseReport(raw);
-
-    console.log(`  ✓ GA4 (property ${propertyId}): ${totals?.sessions ?? 0} sessions last 7 days`);
-    return { propertyId, totals, dailyRows, error: null };
-
+    return {
+      available: true,
+      error: null,
+      totals: {
+        pageviews: totals.total,
+        uniqueVisitors: totals.total_unique,
+      },
+      dailyRows,
+      topPages,
+      referrers,
+    };
   } catch (err) {
-    console.warn(`  ⚠ GA4 fetch failed for property ${propertyId}: ${err.message}`);
-    return { propertyId, totals: null, dailyRows: [], error: err.message };
+    console.warn(`  ⚠ GoatCounter fetch failed for ${siteCode}: ${err.message}`);
+    return {
+      available: false,
+      error: err.message,
+      totals: null,
+      dailyRows: [],
+      topPages: [],
+      referrers: [],
+    };
   }
 }
